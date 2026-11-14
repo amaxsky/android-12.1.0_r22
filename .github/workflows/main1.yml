@@ -61,9 +61,11 @@ jobs:
             frameworks/native frameworks/base \
             system/core system/logging system/libbase \
             external/boringssl external/zlib external/libcxx \
-            bionic prebuilts/clang/host/linux-x86 \
-            prebuilts/build-tools prebuilts/gcc/linux-x86 \
-            prebuilts/rust prebuilts/sdk prebuilts/vndk \
+            bionic \
+            prebuilts/clang/host/linux-x86 \
+            prebuilts/build-tools \
+            prebuilts/sdk \
+            prebuilts/vndk \
             device/phh/treble
 
           echo "--> Replace TouchInputMapper.cpp"
@@ -73,14 +75,26 @@ jobs:
           curl -fL "$URL" -o "$TARGET"
           echo "MD5 after:  $(md5sum "$TARGET" | awk '{print $1}')"
 
-          echo "--> Build libinputreader"
+          echo "--> Detect module containing TouchInputMapper.cpp"
+          MODULE=$(grep -rl "TouchInputMapper.cpp" frameworks/native/services/inputflinger/ \
+            --include="Android.bp" --include="Android.mk" \
+            | xargs grep -hE 'name:\s*"' \
+            | head -1 | sed -E 's/.*name:\s*"([^"]+)".*/\1/')
+
+          if [ -z "$MODULE" ]; then
+            echo "!!! Could not detect module, falling back to libinputreader"
+            MODULE="libinputreader"
+          fi
+          echo "Detected module: $MODULE"
+
+          echo "--> Setup env and build $MODULE"
           source build/envsetup.sh
           lunch treble_arm64_bvN-userdebug
-          m -j$(nproc --all) libinputreader
+          m -j$(nproc --all) "$MODULE"
 
           echo "--> Collect"
           mkdir -p $GITHUB_WORKSPACE/artifacts
-          find out -type f \( -name 'libinputreader.so' -o -name 'TouchInputMapper.o' \) \
+          find out -type f \( -name 'libinput*.so' -o -name 'TouchInputMapper.o' \) \
             -exec cp {} $GITHUB_WORKSPACE/artifacts/ \;
           ls -lR $GITHUB_WORKSPACE/artifacts
           EOF
