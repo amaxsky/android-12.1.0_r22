@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Set up environment
@@ -28,54 +28,68 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      - name: Clone and replace build.sh
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/local/share/chromium \
+            /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Clone build scripts
         run: |
           mkdir -p pixel
           cd pixel
           git clone https://github.com/ponces/treble_build_pe -b twelve
-          curl -fL "https://github.com/amaxsky/android-12.1.0_r22/raw/refs/heads/main/build.sh" \
-            -o treble_build_pe/build.sh
-          chmod +x treble_build_pe/build.sh
 
-      - name: Run build.sh and stop after TouchInputMapper
+      - name: Write minimal build.sh
+        run: |
+          cat > pixel/build.sh <<'EOF'
+          #!/bin/bash
+          set -e
+          BL=$PWD/treble_build_pe
+          BRANCH=twelve
+
+          echo "--> Init"
+          repo init -u https://github.com/PixelExperience/manifest -b $BRANCH --depth=1
+          mkdir -p .repo/local_manifests
+          cp $BL/manifest.xml .repo/local_manifests/pixel.xml
+
+          echo "--> Sync minimal set"
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all) \
+            build/make build/soong build/blueprint \
+            frameworks/native frameworks/base \
+            system/core system/logging system/libbase \
+            external/boringssl external/zlib external/libcxx \
+            bionic prebuilts/clang/host/linux-x86 \
+            prebuilts/build-tools prebuilts/gcc/linux-x86 \
+            prebuilts/rust prebuilts/sdk prebuilts/vndk \
+            device/phh/treble
+
+          echo "--> Replace TouchInputMapper.cpp"
+          TARGET="frameworks/native/services/inputflinger/reader/mapper/TouchInputMapper.cpp"
+          URL="https://github.com/amaxsky/android-12.1.0_r22/raw/refs/heads/main/TouchInputMapper.cpp"
+          echo "MD5 before: $(md5sum "$TARGET" | awk '{print $1}')"
+          curl -fL "$URL" -o "$TARGET"
+          echo "MD5 after:  $(md5sum "$TARGET" | awk '{print $1}')"
+
+          echo "--> Build libinputreader"
+          source build/envsetup.sh
+          lunch treble_arm64_bvN-userdebug
+          m -j$(nproc --all) libinputreader
+
+          echo "--> Collect"
+          mkdir -p $GITHUB_WORKSPACE/artifacts
+          find out -type f \( -name 'libinputreader.so' -o -name 'TouchInputMapper.o' \) \
+            -exec cp {} $GITHUB_WORKSPACE/artifacts/ \;
+          ls -lR $GITHUB_WORKSPACE/artifacts
+          EOF
+          chmod +x pixel/build.sh
+
+      - name: Run build.sh
         run: |
           cd pixel
-          setsid bash treble_build_pe/build.sh twelve &
-          BUILD_PID=$!
-
-          PREV=""
-          STABLE=0
-          while kill -0 $BUILD_PID 2>/dev/null; do
-            CUR=$(find out -type f \( -name 'TouchInputMapper.o' -o -name 'libinput*.so' \) \
-                    -printf '%p %s\n' 2>/dev/null | sort)
-            HAS_O=$(echo "$CUR" | grep -c 'TouchInputMapper.o' || true)
-            HAS_SO=$(echo "$CUR" | grep -c 'libinput.*\.so' || true)
-
-            if [ "$HAS_O" -ge 1 ] && [ "$HAS_SO" -ge 1 ]; then
-              if [ "$CUR" = "$PREV" ]; then
-                STABLE=$((STABLE+1))
-              else
-                STABLE=0
-              fi
-              PREV="$CUR"
-              if [ "$STABLE" -ge 2 ]; then
-                echo "TouchInputMapper and libinput*.so ready, stopping."
-                break
-              fi
-            else
-              STABLE=0
-            fi
-            sleep 10
-          done
-
-          # 杀掉进程组，避免残留 make
-          kill -- -$BUILD_PID 2>/dev/null || true
-          wait $BUILD_PID 2>/dev/null || true
-
-          mkdir -p $GITHUB_WORKSPACE/artifacts
-          find out -type f \( -name 'TouchInputMapper.o' -o -name 'libinput*.so' \) \
-            -exec cp {} $GITHUB_WORKSPACE/artifacts/ \; 2>/dev/null || true
-          ls -lR $GITHUB_WORKSPACE/artifacts
+          bash build.sh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
