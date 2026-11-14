@@ -65,6 +65,7 @@ jobs:
             prebuilts/clang/host/linux-x86 \
             prebuilts/build-tools \
             prebuilts/sdk \
+            prebuilts/go/linux-x86 \
             vendor/aosp \
             device/phh/treble
 
@@ -74,6 +75,12 @@ jobs:
           echo "MD5 before: $(md5sum "$TARGET" | awk '{print $1}')"
           curl -fL "$URL" -o "$TARGET"
           echo "MD5 after:  $(md5sum "$TARGET" | awk '{print $1}')"
+
+          echo "--> Generate PHH product config"
+          cd device/phh/treble
+          cp $BL/pe.mk .
+          bash generate.sh pe
+          cd ../../..
 
           echo "--> Build libinputreader"
           source build/envsetup.sh
