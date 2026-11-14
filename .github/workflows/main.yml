@@ -1,0 +1,138 @@
+name: Build PE GSI (TouchInputMapper)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 720
+
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+        with:
+          path: treble_build_pe
+
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl python3 openjdk-11-jdk \
+            bc bison build-essential ccache flex g++-multilib gcc-multilib \
+            gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Configure git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Init PE workspace
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/pixel
+          cd $GITHUB_WORKSPACE/pixel
+          repo init -u https://github.com/PixelExperience/manifest -b twelve
+          mkdir -p .repo/local_manifests
+          cp $GITHUB_WORKSPACE/treble_build_pe/manifest.xml .repo/local_manifests/pixel.xml
+
+      - name: Sync repos
+        run: |
+          cd $GITHUB_WORKSPACE/pixel
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all)
+
+      - name: Replace build.sh
+        run: |
+          cd $GITHUB_WORKSPACE/pixel
+          curl -fL "https://github.com/amaxsky/android-12.1.0_r22/raw/refs/heads/main/build.sh" \
+            -o treble_build_pe/build.sh
+          chmod +x treble_build_pe/build.sh
+
+      - name: Run build.sh and capture libinput
+        run: |
+          cd $GITHUB_WORKSPACE/pixel
+          setsid bash treble_build_pe/build.sh twelve &
+          BUILD_PID=$!
+
+          # 预期文件名：从源码提取所有 libinput* 模块名，补 .so
+          EXPECTED_FILE=/tmp/expected_libinput.txt
+          grep -rhoE 'name:\s*"libinput[^"]*"' \
+            frameworks/native frameworks/base 2>/dev/null \
+            | sed -E 's/name:\s*"([^"]*)"/\1/' \
+            | sort -u | sed 's/$/.so/' > "$EXPECTED_FILE" || true
+          echo "Expected libs:"; cat "$EXPECTED_FILE"
+
+          # 源码中抓不到时，退化为已知常见名单
+          if [ ! -s "$EXPECTED_FILE" ]; then
+            cat > "$EXPECTED_FILE" <<'EOF'
+          libinput.so
+          libinputflinger.so
+          libinputservice.so
+          EOF
+          fi
+
+          # 轮询：所有预期文件存在且大小连续稳定
+          STABLE=0
+          PREV=""
+          while kill -0 $BUILD_PID 2>/dev/null; do
+            CUR=$(find out -type f -name 'libinput*.so' -printf '%p %s\n' 2>/dev/null | sort)
+            MISSING=0
+            while read -r lib; do
+              [ -z "$lib" ] && continue
+              if ! find out -type f -name "$lib" | grep -q .; then
+                MISSING=1
+                break
+              fi
+            done < "$EXPECTED_FILE"
+
+            if [ "$MISSING" -eq 0 ] && [ -n "$CUR" ]; then
+              if [ "$CUR" = "$PREV" ]; then
+                STABLE=$((STABLE+1))
+              else
+                STABLE=0
+              fi
+              PREV="$CUR"
+              if [ "$STABLE" -ge 2 ]; then
+                echo "All expected libs present and stable."
+                break
+              fi
+            else
+              STABLE=0
+            fi
+            sleep 15
+          done
+
+          # build.sh 提前结束但条件未满足
+          if [ "$STABLE" -lt 2 ]; then
+            echo "!!! Build ended before all libinput*.so stabilized"
+            wait $BUILD_PID || true
+            exit 1
+          fi
+
+          # 终止整个进程组，避免残留 make 进程
+          kill -- -$BUILD_PID 2>/dev/null || true
+          wait $BUILD_PID 2>/dev/null || true
+
+          # 收集 lib 和 lib64 下所有 libinput*.so
+          mkdir -p $GITHUB_WORKSPACE/artifacts/lib $GITHUB_WORKSPACE/artifacts/lib64
+          find out -type f -path '*/system/lib/libinput*.so' \
+            -exec cp {} $GITHUB_WORKSPACE/artifacts/lib/ \;
+          find out -type f -path '*/system/lib64/libinput*.so' \
+            -exec cp {} $GITHUB_WORKSPACE/artifacts/lib64/ \;
+
+          echo "Collected:"
+          ls -lR $GITHUB_WORKSPACE/artifacts
+
+      - name: Upload libinput artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libinput-so
+          path: |
+            ${{ github.workspace }}/artifacts/lib/libinput*.so
+            ${{ github.workspace }}/artifacts/lib64/libinput*.so
+          if-no-files-found: error
