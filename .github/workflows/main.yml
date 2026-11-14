@@ -9,11 +9,6 @@ jobs:
     timeout-minutes: 720
 
     steps:
-      - name: Checkout build scripts
-        uses: actions/checkout@v4
-        with:
-          path: treble_build_pe
-
       - name: Set up build environment
         run: |
           sudo apt-get update
@@ -33,33 +28,21 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      - name: Init PE workspace
+      - name: Clone repo and replace build.sh
         run: |
-          mkdir -p $GITHUB_WORKSPACE/pixel
-          cd $GITHUB_WORKSPACE/pixel
-          repo init -u https://github.com/PixelExperience/manifest -b twelve
-          mkdir -p .repo/local_manifests
-          cp $GITHUB_WORKSPACE/treble_build_pe/manifest.xml .repo/local_manifests/pixel.xml
-
-      - name: Sync repos
-        run: |
-          cd $GITHUB_WORKSPACE/pixel
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all)
-
-      - name: Replace build.sh
-        run: |
-          cd $GITHUB_WORKSPACE/pixel
+          mkdir -p pixel
+          cd pixel
+          git clone https://github.com/ponces/treble_build_pe -b twelve
           curl -fL "https://github.com/amaxsky/android-12.1.0_r22/raw/refs/heads/main/build.sh" \
             -o treble_build_pe/build.sh
           chmod +x treble_build_pe/build.sh
 
       - name: Run build.sh and capture libinput
         run: |
-          cd $GITHUB_WORKSPACE/pixel
+          cd pixel
           setsid bash treble_build_pe/build.sh twelve &
           BUILD_PID=$!
 
-          # 预期文件名：从源码提取所有 libinput* 模块名，补 .so
           EXPECTED_FILE=/tmp/expected_libinput.txt
           grep -rhoE 'name:\s*"libinput[^"]*"' \
             frameworks/native frameworks/base 2>/dev/null \
@@ -67,7 +50,6 @@ jobs:
             | sort -u | sed 's/$/.so/' > "$EXPECTED_FILE" || true
           echo "Expected libs:"; cat "$EXPECTED_FILE"
 
-          # 源码中抓不到时，退化为已知常见名单
           if [ ! -s "$EXPECTED_FILE" ]; then
             cat > "$EXPECTED_FILE" <<'EOF'
           libinput.so
@@ -76,7 +58,6 @@ jobs:
           EOF
           fi
 
-          # 轮询：所有预期文件存在且大小连续稳定
           STABLE=0
           PREV=""
           while kill -0 $BUILD_PID 2>/dev/null; do
@@ -107,18 +88,15 @@ jobs:
             sleep 15
           done
 
-          # build.sh 提前结束但条件未满足
           if [ "$STABLE" -lt 2 ]; then
             echo "!!! Build ended before all libinput*.so stabilized"
             wait $BUILD_PID || true
             exit 1
           fi
 
-          # 终止整个进程组，避免残留 make 进程
           kill -- -$BUILD_PID 2>/dev/null || true
           wait $BUILD_PID 2>/dev/null || true
 
-          # 收集 lib 和 lib64 下所有 libinput*.so
           mkdir -p $GITHUB_WORKSPACE/artifacts/lib $GITHUB_WORKSPACE/artifacts/lib64
           find out -type f -path '*/system/lib/libinput*.so' \
             -exec cp {} $GITHUB_WORKSPACE/artifacts/lib/ \;
