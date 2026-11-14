@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 180
 
     steps:
       - name: Set up environment
@@ -37,15 +37,43 @@ jobs:
             -o treble_build_pe/build.sh
           chmod +x treble_build_pe/build.sh
 
-      - name: Run build.sh up to TouchInputMapper
+      - name: Run build.sh and stop after TouchInputMapper
         run: |
           cd pixel
-          # build.sh 内部会 repo init/sync/替换 TouchInputMapper.cpp
-          # 用超时控制，编译到 TouchInputMapper 所在模块后终止
-          timeout 300m bash treble_build_pe/build.sh twelve || true
+          setsid bash treble_build_pe/build.sh twelve &
+          BUILD_PID=$!
+
+          PREV=""
+          STABLE=0
+          while kill -0 $BUILD_PID 2>/dev/null; do
+            CUR=$(find out -type f \( -name 'TouchInputMapper.o' -o -name 'libinput*.so' \) \
+                    -printf '%p %s\n' 2>/dev/null | sort)
+            HAS_O=$(echo "$CUR" | grep -c 'TouchInputMapper.o' || true)
+            HAS_SO=$(echo "$CUR" | grep -c 'libinput.*\.so' || true)
+
+            if [ "$HAS_O" -ge 1 ] && [ "$HAS_SO" -ge 1 ]; then
+              if [ "$CUR" = "$PREV" ]; then
+                STABLE=$((STABLE+1))
+              else
+                STABLE=0
+              fi
+              PREV="$CUR"
+              if [ "$STABLE" -ge 2 ]; then
+                echo "TouchInputMapper and libinput*.so ready, stopping."
+                break
+              fi
+            else
+              STABLE=0
+            fi
+            sleep 10
+          done
+
+          # 杀掉进程组，避免残留 make
+          kill -- -$BUILD_PID 2>/dev/null || true
+          wait $BUILD_PID 2>/dev/null || true
 
           mkdir -p $GITHUB_WORKSPACE/artifacts
-          find out -type f \( -name 'libinput*.so' -o -name 'TouchInputMapper.o' \) \
+          find out -type f \( -name 'TouchInputMapper.o' -o -name 'libinput*.so' \) \
             -exec cp {} $GITHUB_WORKSPACE/artifacts/ \; 2>/dev/null || true
           ls -lR $GITHUB_WORKSPACE/artifacts
 
@@ -54,4 +82,4 @@ jobs:
         with:
           name: input-artifacts
           path: ${{ github.workspace }}/artifacts/*
-          if-no-files-found: warn
+          if-no-files-found: error
