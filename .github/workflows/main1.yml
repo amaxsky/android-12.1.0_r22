@@ -65,7 +65,7 @@ jobs:
             prebuilts/clang/host/linux-x86 \
             prebuilts/build-tools \
             prebuilts/sdk \
-            prebuilts/vndk \
+      
             device/phh/treble
 
           echo "--> Replace TouchInputMapper.cpp"
